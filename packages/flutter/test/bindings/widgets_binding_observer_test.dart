@@ -619,5 +619,54 @@ void main() {
         instance.removeObserver(observer);
       },
     );
+
+    testWidgets(
+      'calls flush on telemetry processor when the web page is hidden',
+      (WidgetTester tester) async {
+        final mockProcessor = MockTelemetryProcessor();
+        final options = defaultTestOptions();
+        options.platform = MockPlatform(isWeb: true);
+        options.bindingUtils = TestBindingWrapper();
+        options.telemetryProcessor = mockProcessor;
+
+        final observer = SentryWidgetsBindingObserver(
+          hub: MockHub(),
+          options: options,
+          isNavigatorObserverCreated: () => true,
+        );
+        final instance = options.bindingUtils.instance!;
+        instance.addObserver(observer);
+
+        await sendLifecycle('hidden');
+
+        expect(mockProcessor.flushCalls, 1);
+
+        instance.removeObserver(observer);
+      },
+    );
+
+    testWidgets('does not flush on web when the page only loses focus', (
+      WidgetTester tester,
+    ) async {
+      final mockProcessor = MockTelemetryProcessor();
+      final options = defaultTestOptions();
+      options.platform = MockPlatform(isWeb: true);
+      options.bindingUtils = TestBindingWrapper();
+      options.telemetryProcessor = mockProcessor;
+
+      final observer = SentryWidgetsBindingObserver(
+        hub: MockHub(),
+        options: options,
+        isNavigatorObserverCreated: () => true,
+      );
+      final instance = options.bindingUtils.instance!;
+      instance.addObserver(observer);
+
+      await sendLifecycle('inactive');
+
+      expect(mockProcessor.flushCalls, 0);
+
+      instance.removeObserver(observer);
+    });
   });
 }

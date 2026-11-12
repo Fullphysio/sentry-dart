@@ -89,6 +89,12 @@ class SentryWidgetsBindingObserver with WidgetsBindingObserver {
       );
     }
 
+    // A hidden page can be closed without another event. Flush now, while the
+    // browser still lets the transport finish its requests.
+    if (_options.platform.isWeb && state == AppLifecycleState.hidden) {
+      _options.telemetryProcessor.flush();
+    }
+
     // Enable app lifecycle trace generation if:
     // - SentryNavigatorObserver is not used
     // - Platform is not web, app lifecycle hooks are not reliable enough on web
