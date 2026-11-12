@@ -8,6 +8,8 @@ import 'package:sentry_flutter/sentry_flutter.dart';
 import 'package:sentry_flutter/src/app_start/generic_app_start_integration.dart';
 import 'package:sentry_flutter/src/navigation/time_to_display_tracker.dart';
 import 'package:sentry_flutter/src/navigation/time_to_display_tracker_v2.dart';
+import 'package:sentry_flutter/src/web/page_load/web_page_load.dart';
+import 'package:sentry/src/platform/mock_platform.dart';
 // Internal import is fine in tests.
 import 'package:sentry/src/telemetry/span/transaction/sentry_tracer.dart';
 
@@ -316,6 +318,131 @@ void main() {
 
       expect(integrationFrameHandler.postFrameCallback, isNull);
     });
+
+    group('on web', () {
+      final navigationStart = DateTime.utc(2026, 1, 1, 12);
+      late FakeFrameCallbackHandler integrationFrameHandler;
+      late _FakeWebPageLoad webPageLoad;
+      late List<RecordingSentrySpanV2> endedSpans;
+
+      GenericAppStartIntegration getWebSut() => GenericAppStartIntegration(
+        integrationFrameHandler,
+        () => webPageLoad,
+      );
+
+      setUp(() {
+        GenericAppStartIntegration.resetWebPageLoad();
+        fixture.options.platform = MockPlatform.linux(isWeb: true);
+        integrationFrameHandler = FakeFrameCallbackHandler();
+        webPageLoad = _FakeWebPageLoad(navigationStart);
+        endedSpans = [];
+        fixture.options.lifecycleRegistry.registerCallback<OnProcessSpan>((
+          event,
+        ) {
+          if (event.span case final RecordingSentrySpanV2 span) {
+            endedSpans.add(span);
+          }
+        });
+      });
+
+      test('starts the app start span at the navigation start', () {
+        getWebSut().call(fixture.hub, fixture.options);
+
+        expect(fixture.hub.getActiveSpan()!.startTimestamp, navigationStart);
+      });
+
+      test('adds the page load attributes after the first frame', () {
+        getWebSut().call(fixture.hub, fixture.options);
+        final appStartSpan = fixture.hub.getActiveSpan()!;
+
+        expect(appStartSpan.attributes['browser.web_vital.ttfb.value'], isNull);
+
+        integrationFrameHandler.postFrameCallback!(Duration.zero);
+
+        expect(
+          appStartSpan.attributes['browser.web_vital.ttfb.value']?.value,
+          120.0,
+        );
+      });
+
+      test('adds resources, measures and long tasks as child spans', () {
+        getWebSut().call(fixture.hub, fixture.options);
+        final appStartSpan = fixture.hub.getActiveSpan()!;
+
+        integrationFrameHandler.postFrameCallback!(Duration.zero);
+
+        final operations = {
+          for (final span in endedSpans)
+            span.name:
+                span.attributes[SemanticAttributesConstants.sentryOp]?.value,
+        };
+        expect(operations['/main.dart.js'], 'resource.script');
+        expect(operations['flutter.engine_init'], 'measure');
+        expect(operations['Main UI thread blocked'], 'ui.long-task');
+        expect(
+          endedSpans
+              .where((span) => span.name == '/main.dart.js')
+              .single
+              .parentSpan,
+          appStartSpan,
+        );
+      });
+
+      test('adds nothing when the app start span ended before the frame', () {
+        getWebSut().call(fixture.hub, fixture.options);
+        final appStartSpan = fixture.hub.getActiveSpan()!;
+
+        appStartSpan.end();
+        endedSpans.clear();
+        integrationFrameHandler.postFrameCallback!(Duration.zero);
+
+        expect(endedSpans, isEmpty);
+        expect(appStartSpan.attributes['browser.web_vital.ttfb.value'], isNull);
+        expect(webPageLoad.spansReadCount, 1);
+      });
+
+      test('stops the long task collection without a navigation start', () {
+        webPageLoad = _FakeWebPageLoad(null);
+
+        getWebSut().call(fixture.hub, fixture.options);
+
+        expect(webPageLoad.spansReadCount, 1);
+        expect(integrationFrameHandler.postFrameCallback, isNull);
+      });
+
+      test('reports the page load once per page', () {
+        getWebSut().call(fixture.hub, fixture.options);
+        fixture.hub.getActiveSpan()!.end();
+
+        final secondFrameHandler = FakeFrameCallbackHandler();
+        fixture.options.timeToDisplayTrackerV2 = TimeToDisplayTrackerV2(
+          hub: fixture.hub,
+          frameCallbackHandler: fixture.fakeFrameHandler,
+        );
+        GenericAppStartIntegration(
+          secondFrameHandler,
+          () => webPageLoad,
+        ).call(fixture.hub, fixture.options);
+
+        expect(secondFrameHandler.postFrameCallback, isNull);
+        expect(
+          fixture.hub.getActiveSpan()!.startTimestamp,
+          isNot(navigationStart),
+        );
+      });
+
+      test('does not read the page load on other platforms', () {
+        fixture.options.platform = MockPlatform.linux();
+
+        getWebSut().call(fixture.hub, fixture.options);
+
+        expect(integrationFrameHandler.postFrameCallback, isNull);
+        expect(
+          fixture.hub.getActiveSpan()!.startTimestamp,
+          isNot(navigationStart),
+        );
+      });
+    });
   });
 }
 
@@ -343,6 +470,38 @@ class Fixture {
     pageBuilder: (_, _, _) => const SizedBox.shrink(),
     settings: RouteSettings(name: name),
   );
+}
+
+class _FakeWebPageLoad implements WebPageLoad {
+  _FakeWebPageLoad(this.navigationStart);
+
+  @override
+  final DateTime? navigationStart;
+
+  WebPageLoadSpan span(String name, String operation) => WebPageLoadSpan(
+    name: name,
+    operation: operation,
+    startTimestamp: navigationStart!.add(const Duration(milliseconds: 10)),
+    endTimestamp: navigationStart!.add(const Duration(milliseconds: 90)),
+  );
+
+  @override
+  Map<String, SentryAttribute> attributes() => {
+    'browser.web_vital.ttfb.value': SentryAttribute.double(120),
+  };
+
+  int spansReadCount = 0;
+
+  @override
+  List<WebPageLoadSpan> spans() {
+    spansReadCount++;
+    if (navigationStart == null) return const [];
+    return [
+      span('/main.dart.js', 'resource.script'),
+      span('flutter.engine_init', 'measure'),
+      span('Main UI thread blocked', 'ui.long-task'),
+    ];
+  }
 }
 
 class _FakeTransport implements Transport {

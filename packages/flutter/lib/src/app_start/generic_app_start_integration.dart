@@ -5,6 +5,7 @@ import 'package:meta/meta.dart';
 import '../../sentry_flutter.dart';
 import '../bindings/frame_callback_handler.dart';
 import '../utils/internal_logger.dart';
+import '../web/page_load/web_page_load.dart';
 
 // TODO(buenaflor): marking this internal until we can find a robust way to unify the TTID/TTFD implementation as currently it is very fragmented.
 
@@ -17,10 +18,21 @@ import '../utils/internal_logger.dart';
 /// integration call to the first completed frame.
 @internal
 class GenericAppStartIntegration extends Integration<SentryFlutterOptions> {
-  GenericAppStartIntegration([FrameCallbackHandler? frameHandler])
-    : _framesHandler = frameHandler ?? DefaultFrameCallbackHandler();
+  GenericAppStartIntegration([
+    FrameCallbackHandler? frameHandler,
+    WebPageLoad? Function()? webPageLoadFactory,
+  ]) : _framesHandler = frameHandler ?? DefaultFrameCallbackHandler(),
+       _webPageLoadFactory = webPageLoadFactory ?? createWebPageLoad;
 
   final FrameCallbackHandler _framesHandler;
+  final WebPageLoad? Function() _webPageLoadFactory;
+
+  /// A page loads once. A later `SentryFlutter.init` on the same page must not
+  /// report the time since the navigation as an app start.
+  static bool _webPageLoadReported = false;
+
+  @visibleForTesting
+  static void resetWebPageLoad() => _webPageLoadReported = false;
 
   static const String integrationName = 'GenericAppStart';
 
@@ -29,7 +41,13 @@ class GenericAppStartIntegration extends Integration<SentryFlutterOptions> {
     if (!options.isTracingEnabled()) return;
 
     if (options.traceLifecycle == SentryTraceLifecycle.stream) {
-      options.timeToDisplayTrackerV2.trackAppStart();
+      final webPageLoad = _takeWebPageLoad(options);
+      final appStartSpan = options.timeToDisplayTrackerV2.trackAppStart(
+        startTimestamp: webPageLoad?.navigationStart,
+      );
+      if (webPageLoad != null) {
+        _reportWebPageLoad(hub, appStartSpan, webPageLoad);
+      }
       options.sdk.addIntegration(integrationName);
       return;
     }
@@ -58,5 +76,59 @@ class GenericAppStartIntegration extends Integration<SentryFlutterOptions> {
     });
 
     options.sdk.addIntegration(integrationName);
+  }
+
+  WebPageLoad? _takeWebPageLoad(SentryFlutterOptions options) {
+    if (!options.platform.isWeb || _webPageLoadReported) return null;
+    final webPageLoad = _webPageLoadFactory();
+    if (webPageLoad == null) return null;
+    if (webPageLoad.navigationStart == null) {
+      // Reading the spans stops the long task collection.
+      webPageLoad.spans();
+      return null;
+    }
+    _webPageLoadReported = true;
+    return webPageLoad;
+  }
+
+  /// Adds what the browser recorded before the first frame to [appStartSpan].
+  void _reportWebPageLoad(
+    Hub hub,
+    SentrySpanV2 appStartSpan,
+    WebPageLoad webPageLoad,
+  ) {
+    _framesHandler.addPostFrameCallback((_) {
+      try {
+        // Always read the spans: it stops the long task collection.
+        final spans = webPageLoad.spans();
+        if (appStartSpan.isEnded) return;
+        appStartSpan.setAttributes(webPageLoad.attributes());
+        for (final span in spans) {
+          hub
+              .startInactiveSpan(
+                span.name,
+                parentSpan: appStartSpan,
+                startTimestamp: span.startTimestamp,
+                attributes: {
+                  ...span.attributes,
+                  SemanticAttributesConstants.sentryOp: SentryAttribute.string(
+                    span.operation,
+                  ),
+                  SemanticAttributesConstants.sentryOrigin:
+                      SentryAttribute.string(
+                        SentryTraceOrigins.autoNavigationRouteObserver,
+                      ),
+                },
+              )
+              .end(endTimestamp: span.endTimestamp);
+        }
+      } catch (exception, stackTrace) {
+        internalLogger.error(
+          'An exception occurred while reporting the web page load',
+          error: exception,
+          stackTrace: stackTrace,
+        );
+      }
+    });
   }
 }
