@@ -27,6 +27,7 @@ class WebPlatformContextProvider implements PlatformContextProvider {
     return SentryDevice(
       online: _window.navigator.onLine,
       memorySize: _getMemorySize(),
+      processorCount: _window.navigator.safeHardwareConcurrency,
       orientation: _getScreenOrientation(),
       screenHeightPixels: _window.screen.availHeight,
       screenWidthPixels: _window.screen.availWidth,
@@ -75,4 +76,7 @@ class WebPlatformContextProvider implements PlatformContextProvider {
 extension SafeNavigationGetterExtensions on web.Navigator {
   @JS('deviceMemory')
   external double? get safeDeviceMemory;
+
+  @JS('hardwareConcurrency')
+  external int? get safeHardwareConcurrency;
 }

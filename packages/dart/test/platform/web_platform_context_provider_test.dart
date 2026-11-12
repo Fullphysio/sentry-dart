@@ -23,6 +23,15 @@ void main() {
         expect(contexts.device?.screenDensity, isNotNull);
       });
 
+      test('returns device with processor count', () async {
+        final contexts = await fixture.getSut().buildContexts();
+
+        expect(
+          contexts.device?.processorCount,
+          web.window.navigator.hardwareConcurrency,
+        );
+      });
+
       test('returns device with online status', () async {
         final contexts = await fixture.getSut().buildContexts();
 
